@@ -1,0 +1,28 @@
+# ── Cookies (NEVER commit these — they contain your session tokens) ──────────
+*.json
+!package.json
+
+# ── Downloaded videos ────────────────────────────────────────────────────────
+downloads/
+output/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
