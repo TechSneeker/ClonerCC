@@ -1,10 +1,26 @@
+# ── Scripts de debug/inspeção (não fazem parte do app) ───────────────────────
+debug_fetch.py
+debug_scroll.py
+inspect_mov.py
+inspect_video.py
+
 # ── Cookies (NEVER commit these — they contain your session tokens) ──────────
 *.json
 !package.json
 
-# ── Downloaded videos ────────────────────────────────────────────────────────
+# ── Database ─────────────────────────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+
+# ── Downloaded videos & processed output ─────────────────────────────────────
 downloads/
 output/
+
+# ── Sensitive files ───────────────────────────────────────────────────────────
+my_cookies.json
+cookies.json
+settings.json
 
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
