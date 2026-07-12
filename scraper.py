@@ -1,6 +1,8 @@
 """
 scraper.py
-Scrapes all video URLs from a TikTok profile using exported browser cookies.
+Scrapes all video URLs (+ descriptions) from a TikTok profile using exported
+browser cookies. New videos are saved to the SQLite database; already-known
+URLs are skipped so incremental cloning works correctly.
 
 HOW TO EXPORT YOUR COOKIES:
   1. Install the "Cookie-Editor" extension in Chrome:
@@ -27,12 +29,24 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from playwright_stealth import stealth_sync
 
+from db import VideoRecord, get_db
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 DEFAULT_COOKIES_FILE = "cookies.json"
-SCROLL_STEP  = 2000
-SCROLL_PAUSE = 2.0   # seconds between scrolls
+SCROLL_STEP  = 1200   # pixels per scroll — smaller step = more overlap, fewer missed cards
+SCROLL_PAUSE = 2.5    # seconds to wait after each scroll for lazy-loaded cards to render
+RENDER_WAIT  = 1.0    # extra wait before collecting anchors, letting the DOM settle
+
+# Captcha selectors — TikTok uses these elements when showing a challenge
+CAPTCHA_SELECTORS = [
+    "#captcha-verify-image",
+    "[class*='captcha']",
+    "[id*='captcha']",
+    "[class*='verify']",
+    "iframe[src*='captcha']",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +56,50 @@ def log(msg: str, level: str = "INFO") -> None:
     ts     = datetime.now().strftime("%H:%M:%S")
     prefix = {"INFO": "·", "OK": "✔", "WARN": "!", "ERROR": "✖", "STEP": "▶"}.get(level, "·")
     print(f"[{ts}] {prefix} {msg}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Cookie helpers
+# ---------------------------------------------------------------------------
+def _captcha_detected(page) -> bool:
+    """Check if any known captcha element is visible on the page."""
+    for selector in CAPTCHA_SELECTORS:
+        try:
+            el = page.query_selector(selector)
+            if el and el.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _wait_for_captcha_solve(page) -> None:
+    """
+    Pause scrolling and wait for the user to solve the captcha.
+    Shows a tkinter dialog so the user knows to switch to the browser window.
+    """
+    import tkinter as tk
+    from tkinter import messagebox
+
+    log("⚠ CAPTCHA detectado! Resolva no browser e clique OK.", "WARN")
+
+    # Bring up a small dialog on top
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    messagebox.showinfo(
+        "ClonerCC — Captcha",
+        "O TikTok exibiu um captcha.\n\n"
+        "1. Alterne para a janela do browser\n"
+        "2. Resolva o desafio\n"
+        "3. Clique OK aqui para continuar o scroll",
+        parent=root,
+    )
+    root.destroy()
+
+    # Wait a bit for the page to recover after solving
+    time.sleep(2)
+    log("Continuando scroll após captcha.", "OK")
 
 
 # ---------------------------------------------------------------------------
@@ -97,20 +155,24 @@ def scrape_profile(
     username: str,
     cookies_path: str = DEFAULT_COOKIES_FILE,
     max_videos: int | None = None,
-) -> list[str]:
+) -> list[VideoRecord]:
     """
-    Navigate to a TikTok profile, inject cookies, scroll, and collect video URLs.
+    Navigate to a TikTok profile, inject cookies, scroll, and collect video
+    URLs + descriptions. Saves results to the SQLite database and skips URLs
+    that were already scraped before.
 
     Args:
         username    : TikTok handle with or without '@'.
         cookies_path: Path to the JSON cookie file exported by Cookie-Editor.
-        max_videos  : Stop after this many URLs (None = collect all).
+        max_videos  : Stop after collecting this many *new* URLs (None = all).
 
     Returns:
-        Ordered list of unique video URLs.
+        List of VideoRecord for videos that are NEW (not previously seen).
+        Already-known videos are updated in the DB but not returned.
     """
     handle      = username.lstrip("@")
     profile_url = f"https://www.tiktok.com/@{handle}"
+    db          = get_db()
 
     log(f"Profile    : {profile_url}", "STEP")
     log(f"Max videos : {max_videos or 'all'}")
@@ -122,7 +184,12 @@ def scrape_profile(
     raw_cookies = load_cookies(cookies_path)
     pw_cookies  = to_playwright_cookies(raw_cookies)
 
-    collected: list[str] = []
+    # URLs already known in the DB for this profile
+    known_urls = db.get_known_urls(handle)
+    log(f"Already in DB: {len(known_urls)} videos for @{handle}")
+
+    # url → description map collected this session
+    collected: dict[str, str] = {}   # {url: description}
 
     with sync_playwright() as p:
 
@@ -130,10 +197,10 @@ def scrape_profile(
         context = None
 
         try:
-            # ── Step 2: launch Playwright's own Chromium (no lock issues) ────────
+            # ── Step 2: launch Chromium ───────────────────────────────────────
             log("Launching Chromium (headless + stealth)...", "STEP")
             browser = p.chromium.launch(
-                headless=True,
+                headless=False,   # must be visible so user can solve captcha if needed
                 args=["--disable-blink-features=AutomationControlled"],
             )
             context = browser.new_context(
@@ -146,22 +213,22 @@ def scrape_profile(
             )
             log("Browser launched.", "OK")
 
-            # ── Step 3: inject cookies ───────────────────────────────────────────
+            # ── Step 3: inject cookies ────────────────────────────────────────
             log(f"Injecting {len(pw_cookies)} cookies into browser context...", "STEP")
             context.add_cookies(pw_cookies)
             log("Cookies injected.", "OK")
 
-            # ── Step 4: open page + apply stealth ────────────────────────────────
+            # ── Step 4: open page + apply stealth ─────────────────────────────
             page = context.new_page()
             stealth_sync(page)
             log("Stealth patches applied.", "OK")
 
-            # ── Step 5: navigate ─────────────────────────────────────────────────
+            # ── Step 5: navigate ──────────────────────────────────────────────
             log(f"Navigating to {profile_url} ...", "STEP")
             page.goto(profile_url, wait_until="domcontentloaded", timeout=30_000)
             log("DOM content loaded.", "OK")
 
-        # ── Step 6: wait for video cards ─────────────────────────────────────
+            # ── Step 6: wait for video cards ──────────────────────────────────
             log("Waiting for video cards to appear...", "STEP")
             try:
                 page.wait_for_selector('a[href*="/video/"]', timeout=15_000)
@@ -171,7 +238,7 @@ def scrape_profile(
                 log("Possible causes: cookies expired, profile is private, or TikTok blocked the request.", "WARN")
                 return []
 
-            # ── Step 7: scroll loop ───────────────────────────────────────────────
+            # ── Step 7: scroll loop ───────────────────────────────────────────
             log("Starting scroll loop...", "STEP")
             print()
 
@@ -182,18 +249,26 @@ def scrape_profile(
             while True:
                 scroll_n += 1
 
-                anchors = page.eval_on_selector_all(
+                # Extract url + description from each video card
+                cards = page.eval_on_selector_all(
                     'a[href*="/video/"]',
-                    "els => els.map(e => e.href)"
+                    """els => els.map(e => ({
+                        url: e.href,
+                        desc: (
+                            e.querySelector('[data-e2e="video-desc"]') ||
+                            e.querySelector('span[class*="desc"]') ||
+                            e.closest('div[class*="item"]')?.querySelector('span') ||
+                            null
+                        )?.innerText?.trim() || ''
+                    }))"""
                 )
 
-                seen           = set(collected)
                 new_this_round = 0
-                for url in anchors:
-                    # Only keep videos that belong to the target profile
-                    if f"/@{handle}/video/" in url and url not in seen:
-                        collected.append(url)
-                        seen.add(url)
+                for card in cards:
+                    url  = card["url"]
+                    desc = card["desc"]
+                    if f"/@{handle}/video/" in url and url not in collected:
+                        collected[url] = desc
                         new_this_round += 1
 
                 count = len(collected)
@@ -203,9 +278,10 @@ def scrape_profile(
                     f"(+{new_this_round} new)"
                 )
 
-                if max_videos and count >= max_videos:
-                    collected = collected[:max_videos]
-                    log(f"Reached limit of {max_videos} videos. Stopping.", "OK")
+                # Stop at max_videos *new* (not already in DB)
+                new_to_db = [u for u in collected if u not in known_urls]
+                if max_videos and len(new_to_db) >= max_videos:
+                    log(f"Reached limit of {max_videos} new videos. Stopping.", "OK")
                     break
 
                 if count == previous_count:
@@ -222,6 +298,17 @@ def scrape_profile(
                 page.evaluate(f"window.scrollBy(0, {SCROLL_STEP})")
                 time.sleep(SCROLL_PAUSE)
 
+                # Check for captcha before collecting next batch
+                if _captcha_detected(page):
+                    _wait_for_captcha_solve(page)
+
+                # Extra settle wait — lets lazy-loaded cards finish rendering
+                # before the next collection pass
+                try:
+                    page.wait_for_load_state("networkidle", timeout=3_000)
+                except Exception:
+                    time.sleep(RENDER_WAIT)
+
         except KeyboardInterrupt:
             log("Interrupted by user.", "WARN")
 
@@ -229,7 +316,6 @@ def scrape_profile(
             log(f"Unexpected error: {e}", "ERROR")
 
         finally:
-            # ── Step 8: guaranteed browser cleanup ───────────────────────────
             print()
             log("Closing browser...", "STEP")
             try:
@@ -239,12 +325,34 @@ def scrape_profile(
                     browser.close()
                 log("Browser closed.", "OK")
             except Exception:
-                # If already closed, ignore
                 pass
 
+    # ── Step 8: persist to DB ─────────────────────────────────────────────
     print()
-    log(f"Done. Total URLs collected: {len(collected)}", "OK")
-    return collected
+    log("Saving to database...", "STEP")
+    new_records: list[VideoRecord] = []
+
+    for url, desc in collected.items():
+        record = VideoRecord(url=url, profile=handle, description=desc)
+        db.upsert_video(record)
+        if url not in known_urls:
+            new_records.append(record)
+
+    # Respect max_videos cap on what we return
+    if max_videos:
+        new_records = new_records[:max_videos]
+
+    s = db.stats(handle)
+    log(f"DB stats for @{handle} — pending: {s.get('pending', 0)}  downloaded: {s.get('downloaded', 0)}  error: {s.get('error', 0)}", "OK")
+    log(f"New videos this run: {len(new_records)}", "OK")
+
+    # ── Step 9: fetch descriptions via yt-dlp (no download) ───────────────
+    if new_records:
+        log("Fetching descriptions via yt-dlp...", "STEP")
+        from downloader import fetch_descriptions
+        fetch_descriptions(new_records, cookies_path=cookies_path)
+
+    return new_records
 
 
 # ---------------------------------------------------------------------------
@@ -297,22 +405,25 @@ def main() -> None:
     if not username:
         parser.error("username is required (positional or via --user)")
 
-    urls = scrape_profile(username, cookies_path=args.cookies, max_videos=args.max)
+    records = scrape_profile(username, cookies_path=args.cookies, max_videos=args.max)
 
-    if not urls:
-        log("No URLs collected. Exiting.", "ERROR")
+    if not records:
+        log("No new URLs collected. Exiting.", "ERROR")
         sys.exit(1)
 
     print()
-    log(f"Collected URLs ({len(urls)}):", "STEP")
-    for i, url in enumerate(urls, 1):
-        print(f"  {i:>3}. {url}")
+    log(f"New videos ({len(records)}):", "STEP")
+    for i, r in enumerate(records, 1):
+        desc_preview = r.description[:60] + "…" if len(r.description) > 60 else r.description
+        print(f"  {i:>3}. {r.url}")
+        if desc_preview:
+            print(f"       └─ {desc_preview}")
 
     if args.download:
-        from downloader import download_videos
+        from downloader import download_records
         print()
         log(f"Starting download → '{args.output}'", "STEP")
-        download_videos(urls, args.output)
+        download_records(records, args.output)
 
 
 if __name__ == "__main__":
