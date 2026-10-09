@@ -13,10 +13,10 @@ HOW TO EXPORT YOUR COOKIES:
   5. Save the file as cookies.json in this project folder.
 
 Usage:
-    python scraper.py dakpsico1
-    python scraper.py dakpsico1 --max 50
-    python scraper.py dakpsico1 --max 50 --download --output downloads
-    python scraper.py dakpsico1 --cookies my_cookies.json
+    python scraper.py exemplo_usuario
+    python scraper.py exemplo_usuario --max 50
+    python scraper.py exemplo_usuario --max 50 --download --output downloads
+    python scraper.py exemplo_usuario --cookies my_cookies.json
 """
 
 import argparse

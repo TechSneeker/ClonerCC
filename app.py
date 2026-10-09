@@ -646,7 +646,7 @@ class App(ctk.CTk):
                 limit=limit,
                 overwrite=False,
                 log_fn=lambda msg: self._log_queue.put(msg),
-                state_json_path=r"C:\!projects\raspafacil\rf-kwai-uploader\state.json",
+                state_json_path=None,
             )
             if generated:
                 self._log_queue.put(

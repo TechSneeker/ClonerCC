@@ -1,0 +1,22 @@
+[
+  {
+    "name": "sessionid",
+    "value": "SEU_VALOR_AQUI",
+    "domain": ".tiktok.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "None",
+    "expirationDate": 1799999999
+  },
+  {
+    "name": "tt_csrf_token",
+    "value": "SEU_VALOR_AQUI",
+    "domain": ".tiktok.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "sameSite": "Lax",
+    "expirationDate": 1799999999
+  }
+]

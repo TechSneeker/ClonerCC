@@ -286,7 +286,7 @@ def _find_file(output_dir: str, video_id: str) -> Path | None:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     URLS = [
-        "https://www.tiktok.com/@dakpsico1/video/7570365422873169159",
-        "https://www.tiktok.com/@dakpsico1/video/7660343642267127060",
+        "https://www.tiktok.com/@exemplo_usuario/video/0000000000000000000",
+        "https://www.tiktok.com/@exemplo_usuario/video/0000000000000000001",
     ]
     download_videos(URLS, "downloads")
